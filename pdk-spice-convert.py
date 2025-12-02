@@ -73,6 +73,70 @@ class EnvVarSubstitutionRule(Rule):
 
         return self._pattern.sub(repl, line)
 
+class IncludeDirectiveRule(Rule):
+    """
+    Handle ".include <path> ..." directives.
+
+    Rules:
+      - If the line (after leading whitespace) starts with ".include" (case-insensitive),
+        take the next whitespace-delimited token as the path.
+      - Support quoted paths: .include "/absolute/path" or .include '/absolute/path'
+      - If the path is not absolute -> raise ValueError (error).
+      - Read the file at the absolute path and return its content (inject in place).
+      - Ignore any text after the path token.
+      - If file can't be read -> raise IOError (propagates to caller).
+      - If the line isn't an include directive -> return it unchanged.
+    """
+
+    name = "include_directive"
+
+    # Match leading whitespace, then ".include" token, then whitespace, then the path token.
+    # We capture leading whitespace (group 1) and the raw path token (group 2).
+    # The path token is the first non-whitespace sequence; it may include quotes.
+    _regex = re.compile(r"^(\s*)\.include\b\s+(\S+)", flags=re.IGNORECASE)
+
+    def apply(self, line: str, meta: Dict) -> str:
+        # Fast path: if no ".include" text at all, return quickly
+        if ".include" not in line.lower():
+            return line
+
+        lineno = meta.get("lineno", "?")
+
+        m = self._regex.match(line)
+        if not m:
+            # Not a starting include directive (or not well-formed) => return unchanged.
+            return line
+
+        # Extract the path token
+        raw_path_token = m.group(2)
+
+        # Strip quotes if present (single or double)
+        if (raw_path_token.startswith('"') and raw_path_token.endswith('"')) or \
+           (raw_path_token.startswith("'") and raw_path_token.endswith("'")):
+            path = raw_path_token[1:-1]
+        else:
+            path = raw_path_token
+
+        # Make sure we only consider the path token and ignore everything else on the line.
+        # Validate absolute path
+        if not os.path.isabs(path):
+            raise ValueError(f"Line {lineno}: .include path '{path}' is not absolute; refusing to include relative path.")
+
+        # Read file contents
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except Exception as e:
+            # Propagate with contextual information
+            raise IOError(f"Line {lineno}: failed to read include file '{path}': {e}") from e
+
+        # Ensure content ends with a newline so injection does not accidentally merge lines
+        if not content.endswith("\n"):
+            content = content + "\n"
+
+        # Return the file contents in place of the include line.
+        # We do not re-indent or modify the included content; it's injected as-is.
+        return content
 
 class GenericDeviceParamRenameRule(Rule):
     """
@@ -197,12 +261,13 @@ def build_default_pipeline() -> Pipeline:
       2) R-parameter renaming
     """
     rules: List[Rule] = [
-        SpicePrefixRemovalRule(),  # keep first
+        EnvVarSubstitutionRule(),
+        IncludeDirectiveRule(),
+        SpicePrefixRemovalRule(),
         GenericDeviceParamRenameRule("R", {"r_width": "W", "r_length": "L"}),
         # Example: also support MOSFET parameter renames
         GenericDeviceParamRenameRule("D", {"area": "A", "pj": "P"}),
         GenericDeviceParamRenameRule("C", {"c_width": "W", "c_length": "L"}),
-        EnvVarSubstitutionRule(),
     ]
     return Pipeline(rules)
 
