@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 import re
+import os
 import sys
 import argparse
 from typing import List, Dict, Callable
@@ -29,6 +30,49 @@ class Rule:
         `meta` is a dictionary that may hold extra state (e.g. filename, line number).
         """
         raise NotImplementedError
+
+class EnvVarSubstitutionRule(Rule):
+    """
+    Replace occurrences of $::VAR with the value of environment variable VAR.
+
+    - Matches patterns like:
+        $::MY_VAR
+        $::MY_VAR/and/a/path   -> only the $::MY_VAR part is replaced
+    - Does NOT match escaped \$::VAR (keeps the backslash + token)
+    - If the env var is missing, emits a warning and leaves $::VAR as-is
+    """
+
+    name = "env_var_substitution_v2"
+
+    # Explanation of the regex:
+    # (?<!\\)        - don't match if preceded by a backslash (allow escaping)
+    # \$::           - literal marker
+    # ([A-Za-z_][A-Za-z0-9_]*) - capture the variable name (letters, digits, underscore)
+    # (?=$|[^A-Za-z0-9_]) - ensure the next char is either end-of-string or a non-identifier character
+    # Match one or more "word" characters (letters, digits, underscore)
+    _pattern = re.compile(r"(?<!\\)\$::(\w+)(?=$|[^A-Za-z0-9_])")
+
+    def apply(self, line: str, meta: dict) -> str:
+        # Fast path
+        if "$::" not in line:
+            return line
+
+        lineno = meta.get("lineno", "?")
+
+        def repl(m: Match) -> str:
+            varname = m.group(1)
+            value = os.environ.get(varname)
+            if value is None:
+                # Warn and leave the original token untouched
+                sys.stderr.write(
+                    f"[WARN] Line {lineno}: environment variable '{varname}' not found; "
+                    f"leaving '$::{varname}' unchanged.\n"
+                )
+                return m.group(0)
+            return value
+
+        return self._pattern.sub(repl, line)
+
 
 class GenericDeviceParamRenameRule(Rule):
     """
@@ -158,6 +202,7 @@ def build_default_pipeline() -> Pipeline:
         # Example: also support MOSFET parameter renames
         GenericDeviceParamRenameRule("D", {"area": "A", "pj": "P"}),
         GenericDeviceParamRenameRule("C", {"c_width": "W", "c_length": "L"}),
+        EnvVarSubstitutionRule(),
     ]
     return Pipeline(rules)
 
