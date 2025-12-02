@@ -226,8 +226,102 @@ class SpicePrefixRemovalRule(Rule):
         else:
             return line
 
+class SpicePrefixSuperflousRemovalRule(Rule):
+    """
+    Remove leading SPICE 'X' prefix only if it is NOT immediately followed by a digit.
+    Examples:
+        "  Xfoo bar"  -> "  foo bar"
+        "  X_1 bar"   -> "  _1 bar"
+        "  X42 foo"   -> unchanged  (because 'X' is followed by a digit)
+        "  Ysomething" -> unchanged
+    """
 
+    name = "spiceprefix_conditional_removal"
 
+    def apply(self, line: str, meta: Dict) -> str:
+        # Leave blank lines or pure comment lines untouched
+        if not line.strip():
+            return line
+
+        # Leading indentation
+        m = re.match(r"^(\s*)", line)
+        leading_ws = m.group(1) if m else ""
+        rest = line[len(leading_ws):]
+
+        # Only act if the rest starts with 'X'
+        if not rest.startswith("X"):
+            return line
+
+        # If the next character exists and is a digit, do nothing
+        if len(rest) > 1 and rest[1].isdigit():
+            return line
+
+        # Otherwise remove the X
+        return f"{leading_ws}{rest[1:]}"
+
+import re
+from typing import Dict
+
+class ConditionalLeadingXReplaceRule(Rule):
+    """
+    Replace a leading 'X' (first non-whitespace char) with a provided replacement string
+    when a given substring is found somewhere in the line.
+
+    Parameters
+    ----------
+    match_substring : str
+        The substring to look for in the line. If found (according to case sensitivity),
+        the rule will perform the leading-'X' replacement.
+    replacement : str
+        The string that will replace the leading 'X'. If the line's first non-whitespace
+        character isn't 'X', the line is left unchanged.
+    case_sensitive : bool
+        Whether the substring match should be case-sensitive. Default: False.
+
+    Behavior
+    --------
+    - If the first non-whitespace character is 'X' and `match_substring` appears in the line,
+      the leading 'X' is replaced by `replacement` (preserving leading whitespace).
+    - Everything after the replaced 'X' is left intact.
+    - If `match_substring` is not found, the line is returned unchanged.
+    """
+    name = "conditional_leading_x_replace"
+
+    def __init__(self, match_substring: str, replacement: str, case_sensitive: bool = False):
+        if not match_substring:
+            raise ValueError("match_substring must be a non-empty string")
+        self.match_substring = match_substring
+        self.replacement = replacement
+        self.case_sensitive = case_sensitive
+        # precompile a pattern for fast presence checking (we'll use search, not full match)
+        flags = 0 if case_sensitive else re.IGNORECASE
+        # Escape substring so it is treated literally
+        self._match_rx = re.compile(re.escape(match_substring), flags=flags)
+
+    def apply(self, line: str, meta: Dict) -> str:
+        # fast path
+        if not line or not line.strip():
+            return line
+
+        # find leading whitespace and remainder
+        m = re.match(r"^(\s*)(.*)$", line, flags=re.DOTALL)
+        leading_ws = m.group(1)
+        rest = m.group(2)
+
+        if not rest:
+            return line
+
+        # only act if the first non-whitespace char is 'X'
+        if not rest.startswith("X"):
+            return line
+
+        # check whether the match_substring appears in the line according to case sensitivity
+        if not self._match_rx.search(line):
+            return line  # substring not present -> no replacement
+
+        # perform the replacement of the first 'X' only
+        new_rest = self.replacement + rest[1:]
+        return f"{leading_ws}{new_rest}"
 
 class Pipeline:
     """
@@ -263,7 +357,12 @@ def build_default_pipeline() -> Pipeline:
     rules: List[Rule] = [
         EnvVarSubstitutionRule(),
         IncludeDirectiveRule(),
-        SpicePrefixRemovalRule(),
+        #SpicePrefixRemovalRule(),
+        ConditionalLeadingXReplaceRule("cap_nmos", "C"),
+        ConditionalLeadingXReplaceRule("ppolyf_u", "R"),
+        ConditionalLeadingXReplaceRule("nfet", "M"),
+        ConditionalLeadingXReplaceRule("pfet", "M"),
+        SpicePrefixSuperflousRemovalRule(),
         GenericDeviceParamRenameRule("R", {"r_width": "W", "r_length": "L"}),
         # Example: also support MOSFET parameter renames
         GenericDeviceParamRenameRule("D", {"area": "A", "pj": "P"}),
