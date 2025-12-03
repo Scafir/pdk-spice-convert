@@ -38,7 +38,7 @@ class EnvVarSubstitutionRule(Rule):
     - Matches patterns like:
         $::MY_VAR
         $::MY_VAR/and/a/path   -> only the $::MY_VAR part is replaced
-    - Does NOT match escaped \$::VAR (keeps the backslash + token)
+    - Does NOT match escaped \\$::VAR (one slash plus $) keeps the backslash + token
     - If the env var is missing, emits a warning and leaves $::VAR as-is
     """
 
@@ -325,28 +325,43 @@ class ConditionalLeadingXReplaceRule(Rule):
 
 class Pipeline:
     """
-    Holds an ordered list of rules and applies them to each line.
+    Simple rule-by-rule pipeline:
+        for rule in rules:
+            for line in lines:
+                apply rule
     """
+
     def __init__(self, rules: List[Rule]) -> None:
         self.rules = rules
 
-    def process_line(self, line: str, meta: Dict) -> str:
-        cur = line
-        for rule in self.rules:
-            new = rule.apply(cur, meta)
-            # If verbose requested, we can track changes in meta (handled externally)
-            cur = new
-        return cur
-
     def process_stream(self, in_stream, out_stream, verbose: bool = False):
-        meta = {}
-        for lineno, raw_line in enumerate(in_stream, start=1):
-            meta = {"lineno": lineno}
-            new_line = self.process_line(raw_line, meta)
-            if verbose and new_line != raw_line:
-                sys.stderr.write(f"[line {lineno}] transformed -> {new_line.rstrip()}\n")
-            out_stream.write(new_line)
+        # Read all lines as a simple list (preserve endings)
+        lines = in_stream.readlines()
 
+        for rule in self.rules:
+            new_lines = []
+            for lineno, line in enumerate(lines, start=1):
+                meta = {"lineno": lineno, "rule": rule.name}
+                new_line = rule.apply(line, meta)
+
+                if verbose and new_line != line:
+                    before = line.rstrip("\n")
+                    after = new_line.rstrip("\n")
+                    sys.stderr.write(f"[{rule.name}] line {lineno}: '{before}' -> '{after}'\n")
+
+                # Allow rules to inject multiple lines (e.g. from .include)
+                if "\n" in new_line:
+                    parts = new_line.splitlines(keepends=True)
+                    new_lines.extend(parts)
+                else:
+                    new_lines.append(new_line)
+
+            # Update for the next rule
+            lines = new_lines
+
+        # Write final output
+        for line in lines:
+            out_stream.write(line)
 
 def build_default_pipeline() -> Pipeline:
     """
